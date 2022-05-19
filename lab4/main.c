@@ -140,7 +140,7 @@ int main(int argc, char** argv){
 #ifdef PROFILE
     int calc_start = MPE_Log_get_event_number();
     int calc_end = MPE_Log_get_event_number();
-    MPE_Describe_state(init_start, init_end, "calculate", "blue");
+    MPE_Describe_state(calc_start, calc_end, "calculate", "blue");
 #endif
 
     while(1){

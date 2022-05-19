@@ -9,6 +9,7 @@
 
 
 #define BALANCE
+#define DEBUG
 
 
 struct ExecutionContext{
@@ -72,19 +73,17 @@ void* main_thread(void* context_){
             continue;
         }
 
-        printf("%d %d\n", context->rank_comm_world, i);
+#ifdef DEBUG
+        fprintf(stderr, "%d %d\n", context->rank_comm_world, i);
+#endif
 
         Task task;
         recv_task(&task, i);
         task_doer(&task);
 
-        //not necessary
-        pthread_mutex_lock(&context->mutex);
+        //not concurrent
         vTask_push_back(&context->tasks, &task);
-        pthread_mutex_unlock(&context->mutex);
     }
-
-    printf("%d\n", context->rank_comm_world);
 
     MPI_Barrier(MPI_COMM_WORLD);
     int want_task=0;
@@ -127,6 +126,111 @@ void* support_thread(void* context_) {
 }
 
 
+Task* gather_results(struct ExecutionContext* context, size_t* task_cnt){
+
+    int* counts = (int*) malloc(sizeof(int) * context->comm_world_size);
+    int* displs = (int*) malloc(sizeof(int) * context->comm_world_size);
+    if(counts == NULL || displs == NULL){
+        fprintf(stderr, "alloc fail\n");
+        exit(1);
+    }
+
+    int count_byte = context->tasks.cnt * sizeof(Task);
+    MPI_Allgather(&count_byte, 1, MPI_INT, counts, 1, MPI_INT, MPI_COMM_WORLD);
+    int displ = 0;
+    int total_bytes = 0;
+    for(int i=0; i<context->comm_world_size; ++i){
+        displs[i] = displ;
+        displ += counts[i];
+        total_bytes += counts[i];
+    }
+
+    Task *tasks = NULL;
+    if(context->rank_comm_world == 0){
+        if ((tasks = (Task *) malloc(total_bytes)) == NULL) {
+            perror("alloc fail");
+            exit(1);
+        }
+    }
+    //warning - does not work correctly on different architectures
+    MPI_Gatherv(context->tasks.ptr, count_byte, MPI_BYTE, tasks,
+                counts, displs, MPI_BYTE, 0, MPI_COMM_WORLD);
+
+    free(displs);
+    free(counts);
+
+    *task_cnt = total_bytes / sizeof(Task);
+    if(context->rank_comm_world == 0){
+        sort_tasks_id(tasks, *task_cnt);
+    }
+
+    return tasks;
+}
+
+
+void complete_tasks(struct ExecutionContext* context){
+
+    pthread_attr_t attr;
+    if(pthread_attr_init(&attr) != 0){
+        perror("pthread_attr_init fail");
+        exit(1);
+    };
+
+    if(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE) != 0){
+        perror("pthread_attr_setdetachstate fail");
+        exit(1);
+    }
+
+    pthread_t threads[2];
+
+    if(pthread_create(threads, &attr, main_thread, context) != 0){
+        perror("pthread_create fail");
+        exit(1);
+    }
+
+#ifdef BALANCE
+    if(pthread_create(threads+1, &attr, support_thread, context) != 0){
+        perror("pthread_create fail");
+        exit(1);
+    }
+#endif
+
+    if(pthread_attr_destroy(&attr) !=0 ){
+        perror("pthread_attr_destroy fail");
+        exit(1);
+    }
+
+
+    if (pthread_join(threads[0], NULL) != 0) {
+        perror("pthread_attr_destroy fail");
+        exit(1);
+    }
+
+
+#ifdef BALANCE
+    if (pthread_join(threads[1], NULL) != 0) {
+        perror("pthread_attr_destroy fail");
+        exit(1);
+    }
+#endif
+
+
+#ifdef DEBUG
+    for(int i=0; i<context->comm_world_size; ++i){
+
+        if(i==context->rank_comm_world){
+            printf("\nProcess %d:\n", i);
+            for(int j=0; j<context->tasks.cnt; ++j){
+                print_task(context->tasks.ptr+j);
+            }
+        }
+
+        MPI_Barrier(MPI_COMM_WORLD);
+    }
+#endif
+
+}
+
 
 int main(int argc, char** argv){
 
@@ -142,71 +246,24 @@ int main(int argc, char** argv){
     context_init(&context);
     for(int i=0; i<3; ++i){
         Task task;
-        task.res = 0;
-        task.job = (context.rank_comm_world+1)*3;
-        task.id = context.rank_comm_world;
+        create_task(&task, (context.rank_comm_world+1)*3, context.rank_comm_world*3+i);
         vTask_push_back(&context.tasks, &task);
     }
 
-    pthread_attr_t attr;
-    if(pthread_attr_init(&attr) != 0){
-        perror("pthread_attr_init fail");
-        return 1;
-    };
+    complete_tasks(&context);
+    size_t cnt;
+    Task* tasks = gather_results(&context, &cnt);
+    vTask_free(&context.tasks);
 
-    if(pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE) != 0){
-        perror("pthread_attr_setdetachstate fail");
-        return 1;
-    }
-
-    pthread_t threads[2];
-
-    if(pthread_create(threads, &attr, main_thread, &context) != 0){
-        perror("pthread_create fail");
-        return 1;
-    }
-
-#ifdef BALANCE
-    if(pthread_create(threads+1, &attr, support_thread, &context) != 0){
-        perror("pthread_create fail");
-        return 1;
-    }
-#endif
-
-    if(pthread_attr_destroy(&attr) !=0 ){
-        perror("pthread_attr_destroy fail");
-        return 1;
-    }
-
-
-    if (pthread_join(threads[0], NULL) != 0) {
-        perror("pthread_attr_destroy fail");
-        return 1;
-    }
-
-
-#ifdef BALANCE
-    if (pthread_join(threads[1], NULL) != 0) {
-        perror("pthread_attr_destroy fail");
-        return 1;
-    }
-#endif
-
-    for(int i=0; i<context.comm_world_size; ++i){
-
-        if(i==context.rank_comm_world){
-            printf("\nProcess %d:\n", i);
-            for(int j=0; j<context.tasks.cnt; ++j){
-                Task* task = context.tasks.ptr+j;
-                printf("%d, %d, %d\n", task->job, task->res, task->id);
-            }
+    MPI_Barrier(MPI_COMM_WORLD);
+    if(context.rank_comm_world == 0) {
+        printf("\nResult: \n");
+        for (int i = 0; i < cnt; ++i) {
+            print_task(tasks + i);
         }
 
-        MPI_Barrier(MPI_COMM_WORLD);
+        free(tasks);
     }
-
-
-    vTask_free(&context.tasks);
 
     MPI_Finalize();
     return 0;

@@ -22,3 +22,23 @@ void recv_task(Task* task, int rank){
     MPI_Recv(&task->job, 1, MPI_INT, rank, MESSAGE_TAG_TASK+1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
     MPI_Recv(&task->id, 1, MPI_INT, rank, MESSAGE_TAG_TASK+1, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
 }
+
+void print_task(Task* task){
+    printf("%d %d %d\n", task->job, task->res, task->id);
+}
+
+
+void create_task(Task* task, int job, int id){
+    task->id = id;
+    task->job = job;
+    task->res = 0;
+}
+
+
+static int comp(const void* a, const void* b){
+    return ((Task*) a)->id > ((Task*) b)->id;
+}
+
+void sort_tasks_id(Task* tasks, size_t counts){
+    qsort(tasks, counts, sizeof(Task), comp);
+}

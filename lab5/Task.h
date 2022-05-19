@@ -23,4 +23,10 @@ void send_task(Task* task, int rank);
 
 void recv_task(Task* task, int rank);
 
+void create_task(Task* task, int job, int id);
+
+void sort_tasks_id(Task* tasks, size_t counts);
+
+void print_task(Task* task);
+
 #endif
